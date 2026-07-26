@@ -12,6 +12,7 @@ A framework for simulating multi-agent debates with argumentation graph construc
 - **Cross-Model Analysis**: Aggregate results across different models and datasets
 - **Token Efficiency Tracking**: Monitor token consumption and API costs
 - **Word Cloud Generation**: Visualize debate content across datasets
+- **Statistical Analysis**: Compute confidence intervals and perform significance tests for comparative evaluation
 
 ## Supported Datasets
 
@@ -38,7 +39,7 @@ Any OpenAI-compatible API endpoint, including:
 
 ```bash
 # Install dependencies
-pip install openai tiktoken pandas matplotlib seaborn wordcloud tqdm datasets
+pip install openai tiktoken pandas matplotlib seaborn wordcloud tqdm datasets scipy
 ```
 
 ## Configuration
@@ -47,7 +48,7 @@ Set your API credentials as environment variables:
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
-export OPENAI_BASE_URL="yours"  
+export OPENAI_BASE_URL="your-api-endpoint"  
 ```
 
 ## Usage
@@ -66,6 +67,7 @@ python moderate_main.py \
 ```
 
 **Arguments:**
+
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--dataset` | Dataset name | `mmlu` |
@@ -115,6 +117,30 @@ python count_tokens.py --single results/gpt-4o/mmlu/adv_50_3_3
 python efficiency_metrics.py --base_dir results/qwen3.5-27b
 ```
 
+### Statistical Analysis
+
+Compute 95% confidence intervals for debate quality metrics:
+
+```bash
+python compute_confidence_intervals.py --base_dir results/gpt-4o
+
+# Analyze specific dataset
+python compute_confidence_intervals.py --base_dir results/gpt-4o --dataset mmlu
+
+# Specify output directory
+python compute_confidence_intervals.py --base_dir results/gpt-4o --output_dir results/analysis
+```
+
+Extract multiple-choice answers from LLM responses:
+
+```python
+from answer_parser import extract_choice_answer
+
+response = "The correct answer is (A)"
+answer = extract_choice_answer(response)
+print(answer)  # 'A'
+```
+
 ### Generate Word Clouds
 
 ```bash
@@ -161,6 +187,24 @@ results/
 | `correlation_heatmap.pdf` | Metric correlation analysis |
 | `case_study_sample_*.txt` | Detailed analysis of a representative sample |
 
+## Utility Modules
+
+| Module | Description |
+|--------|-------------|
+| `answer_parser.py` | Extract multiple-choice answers from LLM responses |
+| `compute_confidence_intervals.py` | Compute 95% confidence intervals via bootstrap |
+| `significance_test.py` | Perform paired t-test and Wilcoxon signed-rank test |
 
 ## Citation
-coming...
+
+Coming soon.
+
+**Main Updates:**
+
+1. **Added Features Entry**: Added "Statistical Analysis"
+2. **Added Utility Modules Table**: Listed 3 new utility modules and their functions
+3. **Added Statistical Analysis Usage Examples**:
+- Usage of `compute_confidence_intervals.py`
+- Usage of `significance_test.py`
+- Usage of `answer_parser.py`
+4. **Updated Dependencies**: Added `scipy` to the installation command

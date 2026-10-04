@@ -56,7 +56,7 @@ export OPENAI_BASE_URL="your-api-endpoint"
 ### Run a Debate Simulation
 
 ```bash
-python moderate_main.py \
+python main.py \
     --dataset mmlu \
     --n_samples 50 \
     --n_agents 3 \

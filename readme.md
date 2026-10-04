@@ -195,6 +195,25 @@ results/
 | `compute_confidence_intervals.py` | Compute 95% confidence intervals via bootstrap |
 | `significance_test.py` | Perform paired t-test and Wilcoxon signed-rank test |
 
+
+## Public Conflict-Centric Components
+
+`conflict_centric.py` contains the implementations of algorithm.
+
+`test_conflict_centric.py` verifies these implementations, as a reference for verifiability.
+
+Run with:
+
+```bash
+python test_conflict_centric.py
+```
+
+or,
+
+```bash
+python test_conflict_centric.py --api
+```
+
 ## Citation
 
 Coming soon.

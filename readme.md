@@ -217,13 +217,3 @@ python test_conflict_centric.py --api
 ## Citation
 
 Coming soon.
-
-**Main Updates:**
-
-1. **Added Features Entry**: Added "Statistical Analysis"
-2. **Added Utility Modules Table**: Listed 3 new utility modules and their functions
-3. **Added Statistical Analysis Usage Examples**:
-- Usage of `compute_confidence_intervals.py`
-- Usage of `significance_test.py`
-- Usage of `answer_parser.py`
-4. **Updated Dependencies**: Added `scipy` to the installation command

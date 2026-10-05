@@ -13,7 +13,13 @@ from dataloader import get_dataset
 from prompt import agent_prompt
 
 from argumentation_graph import ArgumentationGraph, NodeType, RelationType
-from argument_extractor import ArgumentExtractor
+from conflict_centric import (
+    compute_graph_inconsistency,
+    detect_unresolved_conflicts,
+    extract_arguments_with_llm,
+    graph_conditioned_refinement,
+    integrate_extraction,
+)
 from audit_visualizer import generate_audit_summary, save_audit_report
 
 
@@ -76,6 +82,9 @@ def generate_round_summary(graph: ArgumentationGraph, round_num: int) -> dict:
 
 
 def main(args):
+    enable_conflict_refinement = getattr(args, "conflict_refinement", False)
+    conflict_top_k = getattr(args, "conflict_top_k", 1)
+    conflict_k_hop = getattr(args, "conflict_k_hop", 3)
     out_dir = Path(args.output_dir, args.dataset, f"adv_{args.n_samples}_{args.n_agents}_{args.n_rounds}")
     out_dir.mkdir(parents=True, exist_ok=True)
     
@@ -107,9 +116,9 @@ def main(args):
                     question, answer, raw_task = parse_question_answer(args.dataset, sample)
 
                     argumentation_graph = ArgumentationGraph()
-                    extractor = ArgumentExtractor(client, args.model_name)
                     
                     all_claims_by_round = {}
+                    debate_history = []
                     
                     agent_contexts = []
                     for agent_id in range(args.n_agents):
@@ -138,43 +147,51 @@ def main(args):
                             completion = query_model(client, agent_context, model_name=args.model_name)
                             assistant_message = construct_assistant_message(completion)
                             agent_context.append(assistant_message)
-                            
-                            claims = extractor.extract_claims(completion, agent_id, round_num)
-                            
-                            for claim_text, node_type, confidence in claims:
-                                node_id = argumentation_graph.add_node(
-                                    content=claim_text,
-                                    node_type=node_type,
-                                    agent_id=agent_id,
-                                    round=round_num,
-                                    confidence=confidence,
-                                    metadata={"raw_response": completion[:200]}
-                                )
-                                round_claims.append((claim_text, node_id, agent_id))
-                                
-                                if round_num > 0:
-                                    previous_claims_text = []
-                                    previous_claims_ids = []
-                                    for r in range(round_num):
-                                        if r in all_claims_by_round:
-                                            for claim in all_claims_by_round[r]:
-                                                previous_claims_text.append(claim[0])
-                                                previous_claims_ids.append(claim[1])
-                                    
-                                    if previous_claims_text:
-                                        relations = extractor.identify_relations(claim_text, previous_claims_text)
-                                        for target_idx, relation_type, strength in relations:
-                                            if target_idx < len(previous_claims_ids):
-                                                argumentation_graph.add_edge(
-                                                    source_id=node_id,
-                                                    target_id=previous_claims_ids[target_idx],
-                                                    relation=relation_type,
-                                                    strength=strength
-                                                )
-                        
+                            debate_history.append(completion)
+                            extraction = extract_arguments_with_llm(
+                                client,
+                                completion,
+                                model=args.model_name,
+                            )
+                            mapping = integrate_extraction(
+                                argumentation_graph,
+                                extraction,
+                                agent_id,
+                                round_num,
+                                completion,
+                            )
+                            for item in extraction.get("nodes", []):
+                                node_id = mapping.get(str(item.get("id", "")))
+                                if node_id is None:
+                                    continue
+                                node = argumentation_graph.nodes[node_id]
+                                round_claims.append((node.content, node_id, agent_id))
+
                         all_claims_by_round[round_num] = round_claims
+
+                        refinement = graph_conditioned_refinement(
+                            argumentation_graph,
+                            question=question,
+                            history=debate_history,
+                            client=client if enable_conflict_refinement else None,
+                            agent_ids=(
+                                tuple(range(min(args.n_agents, 3)))
+                                if enable_conflict_refinement
+                                else ()
+                            ),
+                            top_k=conflict_top_k,
+                            k_hop=conflict_k_hop,
+                            max_rounds=1,
+                        )
+                        debate_history.extend(refinement.responses)
                         
                         round_summary = generate_round_summary(argumentation_graph, round_num)
+                        round_summary.update({
+                            "unresolved_conflicts": len(detect_unresolved_conflicts(argumentation_graph)),
+                            "graph_inconsistency": compute_graph_inconsistency(argumentation_graph),
+                            "refined_conflicts": len(refinement.selected_conflicts),
+                            "refinement_responses": len(refinement.responses),
+                        })
                         debate_summary["rounds"].append(round_summary)
                         
                         print(f"\nRound {round_num + 1} Statistics:")
@@ -250,6 +267,12 @@ if __name__ == "__main__":
     argparser.add_argument("--output_dir", type=str, default='results/gpt-4o', help="Output directory")
     argparser.add_argument("--model_name", type=str, default='gpt-4o',
                         help="Model name to use")
+    argparser.add_argument("--conflict_refinement", action="store_true",
+                        help="Run the optional API-backed conflict refinement reference path")
+    argparser.add_argument("--conflict_top_k", type=int, default=1,
+                        help="Number of unresolved conflicts selected per round")
+    argparser.add_argument("--conflict_k_hop", type=int, default=3,
+                        help="Directed outgoing hops used for local refinement context")
 
     args = argparser.parse_args()
 

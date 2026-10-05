@@ -4,10 +4,12 @@ import json
 import time
 import random
 import argparse
+from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from tqdm import tqdm
 from openai import OpenAI
+from answer_parser import extract_choice_answer
 from commons import parse_question_answer, query_model
 from dataloader import get_dataset
 from prompt import agent_prompt
@@ -29,7 +31,7 @@ def parse_math(text):
     return matches[-1] if matches else ""
 
 
-def construct_message(dataset_name, agents, question, idx):
+def construct_message(dataset_name, agents, question, idx, refinement_feedback=None):
     prefix_string = agent_prompt[dataset_name]['debate'][0]
 
     for agent in agents:
@@ -42,6 +44,12 @@ def construct_message(dataset_name, agents, question, idx):
         response = "\n\n One agent solution: ```{}```".format(agent_response)
 
         prefix_string = prefix_string + response
+
+    if refinement_feedback:
+        prefix_string += (
+            "\n\nGraph-conditioned refinement feedback from the previous round:\n"
+            + "\n\n".join(str(item) for item in refinement_feedback)
+        )
 
     prefix_string = prefix_string + agent_prompt[dataset_name]['debate'][1]
     return {"role": "user", "content": prefix_string}
@@ -81,8 +89,19 @@ def generate_round_summary(graph: ArgumentationGraph, round_num: int) -> dict:
     }
 
 
+def majority_vote(responses):
+    votes = []
+    for response in responses:
+        choice = extract_choice_answer(response)
+        if choice is not None:
+            votes.append(choice)
+    counts = Counter(votes)
+    prediction = counts.most_common(1)[0][0] if counts else None
+    return {"prediction": prediction, "votes": dict(counts)}
+
+
 def main(args):
-    enable_conflict_refinement = getattr(args, "conflict_refinement", False)
+    enable_conflict_refinement = getattr(args, "conflict_refinement", True)
     conflict_top_k = getattr(args, "conflict_top_k", 1)
     conflict_k_hop = getattr(args, "conflict_k_hop", 3)
     out_dir = Path(args.output_dir, args.dataset, f"adv_{args.n_samples}_{args.n_agents}_{args.n_rounds}")
@@ -119,6 +138,9 @@ def main(args):
                     
                     all_claims_by_round = {}
                     debate_history = []
+                    refinement_feedback = []
+                    final_agent_responses = {}
+                    last_refinement_responses = []
                     
                     agent_contexts = []
                     for agent_id in range(args.n_agents):
@@ -141,12 +163,19 @@ def main(args):
                         for agent_id, agent_context in enumerate(agent_contexts):
                             if round_num > 0:
                                 other_agents = agent_contexts[:agent_id] + agent_contexts[agent_id + 1:]
-                                message = construct_message(args.dataset, other_agents, question, 2 * round_num - 1)
+                                message = construct_message(
+                                    args.dataset,
+                                    other_agents,
+                                    question,
+                                    2 * round_num - 1,
+                                    refinement_feedback,
+                                )
                                 agent_context.append(message)
 
                             completion = query_model(client, agent_context, model_name=args.model_name)
                             assistant_message = construct_assistant_message(completion)
                             agent_context.append(assistant_message)
+                            final_agent_responses[agent_id] = completion
                             debate_history.append(completion)
                             extraction = extract_arguments_with_llm(
                                 client,
@@ -184,6 +213,8 @@ def main(args):
                             max_rounds=1,
                         )
                         debate_history.extend(refinement.responses)
+                        refinement_feedback = list(refinement.responses)
+                        last_refinement_responses = list(refinement.responses)
                         
                         round_summary = generate_round_summary(argumentation_graph, round_num)
                         round_summary.update({
@@ -200,6 +231,8 @@ def main(args):
                         print(f"  Support Relations: {round_summary['support_relations']}")
                     
                     audit_summary = generate_audit_summary(argumentation_graph)
+                    vote_responses = last_refinement_responses or list(final_agent_responses.values())
+                    vote = majority_vote(vote_responses)
                     
                     graph_path = save_debate_graph(argumentation_graph, i, current_rep, out_dir)
                     
@@ -211,6 +244,9 @@ def main(args):
                         "dataset": args.dataset,
                         "question": question,
                         "correct_answer": answer,
+                        "predicted_answer": vote["prediction"],
+                        "majority_votes": vote["votes"],
+                        "vote_responses": len(vote_responses),
                         "raw_task": raw_task,
                         "agent_responses": agent_contexts,
                         "argumentation_graph": argumentation_graph.to_dict(),
@@ -235,6 +271,7 @@ def main(args):
                     print(f"Audit report saved to: {audit_report_path}")
                     print(f"Graph stats: {len(argumentation_graph.nodes)} nodes, {len(argumentation_graph.edges)} edges")
                     print(f"Final conclusions: {len(audit_summary.get('conclusions', []))}")
+                    print(f"Majority-vote answer: {vote['prediction']}")
                     print(f"Major disputes: {len(audit_summary.get('top_dispute_nodes', []))}")
                     
                     if audit_summary.get('conclusions'):
@@ -267,12 +304,16 @@ if __name__ == "__main__":
     argparser.add_argument("--output_dir", type=str, default='results/gpt-4o', help="Output directory")
     argparser.add_argument("--model_name", type=str, default='gpt-4o',
                         help="Model name to use")
-    argparser.add_argument("--conflict_refinement", action="store_true",
-                        help="Run the optional API-backed conflict refinement reference path")
+    argparser.add_argument("--conflict_refinement", "--conflict-refinement",
+                        dest="conflict_refinement", action="store_true", default=True,
+                        help="Run API-backed graph-conditioned refinement")
+    argparser.add_argument("--no_conflict_refinement", "--no-conflict-refinement",
+                        dest="conflict_refinement", action="store_false",
+                        help="Disable graph-conditioned refinement")
     argparser.add_argument("--conflict_top_k", type=int, default=1,
                         help="Number of unresolved conflicts selected per round")
     argparser.add_argument("--conflict_k_hop", type=int, default=3,
-                        help="Directed outgoing hops used for local refinement context")
+                        help="Directed incident hops used for local refinement context")
 
     args = argparser.parse_args()
 

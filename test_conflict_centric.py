@@ -9,6 +9,7 @@ except ImportError:
 
 from argumentation_graph import ArgumentationGraph, NodeType, RelationType
 from conflict_centric import (
+    REFINEMENT_SYSTEM_PROMPT,
     build_argument_extraction_prompt,
     compute_graph_inconsistency,
     detect_unresolved_conflicts,
@@ -38,7 +39,7 @@ def sample_graph():
     graph.add_edge(nodes["c"], nodes["d"], RelationType.ATTACKS, 0.8)
     graph.add_edge(nodes["d"], nodes["c"], RelationType.ATTACKS, 0.8)
     graph.add_edge(nodes["e"], nodes["f"], RelationType.ATTACKS, 0.8)
-    graph.add_edge(nodes["f"], nodes["d"], RelationType.SUPPORTS, 0.7)
+    graph.add_edge(nodes["f"], nodes["a"], RelationType.SUPPORTS, 0.7)
     graph.add_edge(nodes["f"], nodes["d"], RelationType.CITES, 0.6)
     return graph, nodes
 
@@ -92,10 +93,7 @@ def api_reply(prompt, model="gpt-4o"):
         messages=[
             {
                 "role": "system",
-                "content": (
-                    "You are an expert reasoning agent participating in a "
-                    "structured multi-agent debate framework."
-                ),
+                "content": REFINEMENT_SYSTEM_PROMPT,
             },
             {"role": "user", "content": prompt},
         ],
@@ -128,16 +126,19 @@ class Checks(unittest.TestCase):
         self.assertEqual(len(picked), 1)
 
         local = retrieve_khop_subgraph(graph, picked[0], k=1)
-        self.assertEqual(len(local.nodes), 3)
-        self.assertNotIn("X", {node.content for node in local.nodes.values()})
+        self.assertEqual(len(local.nodes), 4)
+        self.assertIn("X", {node.content for node in local.nodes.values()})
+        self.assertNotIn("Y", {node.content for node in local.nodes.values()})
         self.assertIn(
-            (RelationType.SUPPORTS, nodes["v"], nodes["z"]),
-            {(edge.relation, edge.source_id, edge.target_id) for edge in graph.edges},
+            (RelationType.CITES, nodes["x"], nodes["u"]),
+            {(edge.relation, edge.source_id, edge.target_id) for edge in local.edges},
         )
 
-        wider = retrieve_khop_subgraph(graph, picked[0], k=2, direction="both")
+        outgoing = retrieve_khop_subgraph(graph, picked[0], k=1, direction="out")
+        self.assertNotIn("X", {node.content for node in outgoing.nodes.values()})
+        wider = retrieve_khop_subgraph(graph, picked[0], k=2)
         self.assertGreaterEqual(len(wider.nodes), len(local.nodes))
-        self.assertIn("X", {node.content for node in wider.nodes.values()})
+        self.assertIn("Y", {node.content for node in wider.nodes.values()})
 
     def test_extraction_matches_appendix_schema(self):
         payload = {
@@ -198,11 +199,31 @@ class Checks(unittest.TestCase):
         self.assertIn("New Claims", graph.nodes[nodes["b"]].content)
         self.assertIn("Refined Conclusion", graph.nodes[nodes["b"]].content)
         self.assertEqual(result.inconsistency_after, 0.0)
-        self.assertNotIn(
+        self.assertIn(
             (nodes["a"], nodes["b"], RelationType.ATTACKS),
             {(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges},
         )
+        self.assertIn(
+            (nodes["f"], nodes["b"], RelationType.SUPPORTS),
+            {(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges},
+        )
         self.assertTrue(all("node_updates" not in call[0] for call in calls))
+
+    def test_empty_refinement_does_not_resolve(self):
+        graph, _ = sample_graph()
+        conflict = detect_unresolved_conflicts(graph)[0]
+        before = compute_graph_inconsistency(graph)
+        edges_before = len(graph.edges)
+        result = graph_conditioned_refinement(
+            graph,
+            conflict=conflict,
+            refine_fn=lambda prompt, context: "",
+            agent_ids=(1,),
+            max_rounds=1,
+        )
+        self.assertEqual(result.inconsistency_before, before)
+        self.assertEqual(result.inconsistency_after, before)
+        self.assertEqual(len(graph.edges), edges_before)
 
     def test_client_refinement_uses_system_prompt(self):
         graph, nodes = sample_graph()

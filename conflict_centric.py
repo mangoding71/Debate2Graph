@@ -214,38 +214,56 @@ def _outgoing_neighbors(graph: Any, node_id: str) -> List[str]:
     return result
 
 
+def _incoming_neighbors(graph: Any, node_id: str) -> List[str]:
+    result = []
+    for edge in _edges(graph):
+        source, target = _edge_endpoints(edge)
+        if target == node_id and source in _nodes(graph):
+            result.append(source)
+    return result
+
+
 def propagate_conflict_utility(
     graph: Any,
     conflicts: Optional[Iterable[Conflict]] = None,
     propagation_steps: int = 3,
     retrieval_hops: int = 3,
-    damping: float = 0.85,
+    damping: Optional[float] = None,
 ) -> Dict[Tuple[str, str], float]:
     selected = [_conflict(item) for item in (conflicts or detect_unresolved_conflicts(graph))]
     if not selected:
         return {}
     matrix = _directed_matrix(graph)
-    node_scores = {node_id: 0.0 for node_id in _nodes(graph)}
-    for item in selected:
-        node_scores[item.source_id] = node_scores.get(item.source_id, 0.0) + item.score
-        node_scores[item.target_id] = node_scores.get(item.target_id, 0.0) + item.score
-    for _ in range(max(0, int(propagation_steps))):
-        next_scores = {node_id: 0.0 for node_id in node_scores}
-        for source, targets in matrix.items():
-            total = sum(targets.values())
-            if total <= 0:
-                next_scores[source] += node_scores[source] * (1.0 - damping)
-                continue
-            for target, weight in targets.items():
-                next_scores[target] += damping * node_scores[source] * weight / total
-        for node_id in next_scores:
-            next_scores[node_id] += (1.0 - damping) * node_scores[node_id]
-        node_scores = next_scores
+    adjacency = {node_id: {} for node_id in _nodes(graph)}
+    for source, targets in matrix.items():
+        total = sum(targets.values())
+        if total <= 0:
+            continue
+        for target, weight in targets.items():
+            adjacency.setdefault(target, {})[source] = weight / total
+
     utilities = {}
     for item in selected:
-        outgoing = sum(matrix.get(item.source_id, {}).values())
-        local = node_scores.get(item.source_id, 0.0) + node_scores.get(item.target_id, 0.0)
-        utilities[item.key] = float(item.score) + local + 0.1 * outgoing
+        region = retrieve_khop_subgraph(graph, item, retrieval_hops)
+        region_ids = set(_nodes(region))
+        influence = {node_id: 0.0 for node_id in _nodes(graph)}
+        influence[item.source_id] = float(item.score)
+        influence[item.target_id] = float(item.score)
+        for _ in range(max(0, int(propagation_steps))):
+            next_influence = {node_id: 0.0 for node_id in influence}
+            for target, sources in adjacency.items():
+                next_influence[target] = sum(
+                    weight * influence.get(source, 0.0)
+                    for source, weight in sources.items()
+                )
+            if damping is not None and 0.0 <= damping < 1.0:
+                next_influence = {
+                    node_id: damping * next_influence[node_id]
+                    + (1.0 - damping) * influence.get(node_id, 0.0)
+                    for node_id in next_influence
+                }
+            influence = next_influence
+        utilities[item.key] = sum(influence.get(node_id, 0.0) for node_id in region_ids)
     return utilities
 
 
@@ -297,7 +315,7 @@ def retrieve_khop_subgraph(
     graph: Any,
     conflict: Conflict,
     k: int = 3,
-    direction: str = "out",
+    direction: str = "incident",
 ) -> Any:
     item = _conflict(conflict)
     if item.source_id not in _nodes(graph) or item.target_id not in _nodes(graph):
@@ -307,13 +325,10 @@ def retrieve_khop_subgraph(
     for _ in range(max(0, int(k))):
         next_frontier = set()
         for node_id in frontier:
-            if direction in {"out", "both"}:
+            if direction in {"out", "both", "incident"}:
                 next_frontier.update(_outgoing_neighbors(graph, node_id))
-            if direction in {"in", "both"}:
-                for edge in _edges(graph):
-                    source, target = _edge_endpoints(edge)
-                    if target == node_id and source in _nodes(graph):
-                        next_frontier.add(source)
+            if direction in {"in", "both", "incident"}:
+                next_frontier.update(_incoming_neighbors(graph, node_id))
         next_frontier -= visited
         visited.update(next_frontier)
         frontier = next_frontier
@@ -588,16 +603,84 @@ def _append_node_text(node: Any, sections: Mapping[str, str]) -> bool:
     return True
 
 
-def _remove_attack(graph: ArgumentationGraph, conflict: Conflict) -> None:
-    graph.edges[:] = [
-        edge
+def _tokens(text: str) -> set:
+    return set(re.findall(r"[A-Za-z0-9]{3,}", str(text).lower()))
+
+
+def _support_candidate(
+    subgraph: Any,
+    conflict: Conflict,
+    evidence_text: str,
+) -> Optional[str]:
+    candidates = []
+    evidence_tokens = _tokens(evidence_text)
+    for node_id, node in _nodes(subgraph).items():
+        if node_id in {conflict.source_id, conflict.target_id}:
+            continue
+        node_type = _node_type(_value(node, "node_type", "type", default="claim"))
+        content = str(_value(node, "content", "text", default=""))
+        priority = {
+            NodeType.EVIDENCE: 3,
+            NodeType.ASSUMPTION: 2,
+            NodeType.CLAIM: 1,
+            NodeType.CONCLUSION: 1,
+        }.get(node_type, 0)
+        overlap = len(evidence_tokens & _tokens(content))
+        candidates.append((overlap, priority, node_id))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return candidates[0][2]
+
+
+def _add_edge_once(
+    graph: ArgumentationGraph,
+    source_id: str,
+    target_id: str,
+    relation: RelationType,
+    strength: float = 0.5,
+) -> bool:
+    if source_id == target_id:
+        return False
+    if any(
+        edge.source_id == source_id
+        and edge.target_id == target_id
+        and edge.relation == relation
         for edge in graph.edges
-        if not (
-            edge.source_id == conflict.source_id
-            and edge.target_id == conflict.target_id
-            and edge.relation == RelationType.ATTACKS
+    ):
+        return False
+    graph.add_edge(source_id, target_id, relation, strength)
+    return True
+
+
+def _apply_refinement_relations(
+    graph: ArgumentationGraph,
+    conflict: Conflict,
+    subgraph: Any,
+    sections: Mapping[str, str],
+) -> bool:
+    changed = False
+    supporting_text = sections.get("Supporting Evidence", "").strip()
+    if supporting_text and supporting_text.lower() not in {"none", "none explicitly identified"}:
+        candidate = _support_candidate(subgraph, conflict, supporting_text)
+        if candidate is not None:
+            changed |= _add_edge_once(
+                graph,
+                candidate,
+                conflict.target_id,
+                RelationType.SUPPORTS,
+                0.7,
+            )
+    resolution = sections.get("Resolution", "").lower()
+    if re.search(r"\b(refute|refutes|refuted|reject|rejects|disprove|unsupported)\b", resolution):
+        changed |= _add_edge_once(
+            graph,
+            conflict.target_id,
+            conflict.source_id,
+            RelationType.ATTACKS,
+            0.7,
         )
-    ]
+    return changed
 
 
 def graph_conditioned_refinement(
@@ -681,22 +764,19 @@ def graph_conditioned_refinement(
                 contexts[item.key] = retrieve_khop_subgraph(graph, item, k_hop)
             local = contexts[item.key]
             prompt = _refinement_prompt(question, history, item, local)
-            responded = False
             for agent_id in ids:
                 response = (
                     _invoke_refiner(refine_fn, prompt, local)
                     if refine_fn is not None
                     else _client_response(client, model, prompt)
                 )
-                responded = True
                 responses.append(response)
                 parsed = _sections(response)
                 target = graph.nodes.get(item.target_id)
                 if target is not None and _append_node_text(target, parsed):
                     updated.append(item.target_id)
+                _apply_refinement_relations(graph, item, local, parsed)
                 history.append(f"agent {agent_id}: {response}")
-            if responded:
-                _remove_attack(graph, item)
         if compute_graph_inconsistency(graph) <= inconsistency_threshold:
             break
     after = compute_graph_inconsistency(graph)
